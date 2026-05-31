@@ -7,15 +7,18 @@ import com.sun.net.httpserver.HttpExchange;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.*;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 
 import java.io.*;
 import java.lang.reflect.Field;
@@ -44,7 +47,8 @@ public class TeamsModule implements DashboardModule {
     }
 
     static class Team {
-        String id; String name; boolean open = false;
+        String id; String name;
+        boolean friendlyFire = false; // false = 팀킬 방지 ON
         final Map<String, Member> members = new LinkedHashMap<>();
         final Map<String, String> banned  = new LinkedHashMap<>();
         Team(String id, String name) { this.id = id; this.name = name; }
@@ -77,7 +81,7 @@ public class TeamsModule implements DashboardModule {
         try { Files.createDirectories(dataFile.getParent()); } catch (IOException ignored) {}
         load();
         registerCommand();
-        chatListener = new TeamChatListener();
+        chatListener = new TeamListener();
         Bukkit.getPluginManager().registerEvents(chatListener, plugin);
         plugin.getLogger().info("[Teams] " + teams.size() + "개 팀 로드됨.");
     }
@@ -119,7 +123,8 @@ public class TeamsModule implements DashboardModule {
 
     // ── Chat listener ──────────────────────────────────────────────────────────
 
-    private class TeamChatListener implements Listener {
+    private class TeamListener implements Listener {
+
         @EventHandler(priority = EventPriority.HIGHEST)
         public void onChat(AsyncChatEvent event) {
             Player p = event.getPlayer();
@@ -131,9 +136,10 @@ public class TeamsModule implements DashboardModule {
 
             event.setCancelled(true);
 
-            Component msg = Component.text("[" + t.name + "] ", NamedTextColor.GOLD)
-                    .append(Component.text(p.getName() + ": ", NamedTextColor.YELLOW))
-                    .append(event.message());
+            Component msg = Component.text("[팀챗] ", NamedTextColor.GREEN).decorate(TextDecoration.BOLD)
+                    .append(Component.text("[" + t.name + "] ").color(NamedTextColor.GOLD).decoration(TextDecoration.BOLD, false))
+                    .append(Component.text(p.getName() + ": ").color(NamedTextColor.YELLOW))
+                    .append(event.message().colorIfAbsent(NamedTextColor.WHITE));
 
             final String tid = t.id;
             synchronized (TeamsModule.this) {
@@ -144,6 +150,29 @@ public class TeamsModule implements DashboardModule {
                     if (m != null) m.sendMessage(msg);
                 }
             }
+        }
+
+        @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+        public void onDamage(EntityDamageByEntityEvent event) {
+            if (!(event.getEntity() instanceof Player victim)) return;
+
+            Player attacker = null;
+            if (event.getDamager() instanceof Player pa) {
+                attacker = pa;
+            } else if (event.getDamager() instanceof Projectile proj && proj.getShooter() instanceof Player ps) {
+                attacker = ps;
+            }
+            if (attacker == null || attacker.getUniqueId().equals(victim.getUniqueId())) return;
+
+            String aUuid = attacker.getUniqueId().toString();
+            String vUuid = victim.getUniqueId().toString();
+            synchronized (TeamsModule.this) {
+                Team t = teamOf(aUuid);
+                if (t == null || !t.members.containsKey(vUuid)) return;
+                if (t.friendlyFire) return;
+            }
+            event.setCancelled(true);
+            attacker.sendMessage("§c같은 팀원은 공격할 수 없습니다.");
         }
     }
 
@@ -174,8 +203,8 @@ public class TeamsModule implements DashboardModule {
                 case "demote"  -> demote(p, args);
                 case "ban"     -> ban(p, args);
                 case "unban"   -> unban(p, args);
-                case "open"    -> open(p);
                 case "chat"    -> chat(p);
+                case "pvp"     -> pvp(p);
                 case "admin"   -> admin(p, args);
                 default        -> help(p);
             }
@@ -187,7 +216,7 @@ public class TeamsModule implements DashboardModule {
             if (!(sender instanceof Player p)) return List.of();
             List<String> subs = new ArrayList<>(List.of(
                 "create","disband","invite","accept","deny","join","leave",
-                "info","list","top","kick","promote","demote","ban","unban","open","chat"
+                "info","list","top","kick","promote","demote","ban","unban","chat","pvp"
             ));
             if (p.isOp()) subs.add("admin");
 
@@ -232,7 +261,7 @@ public class TeamsModule implements DashboardModule {
             p.sendMessage("§e/team leave  §f팀 탈퇴");
             p.sendMessage("§e/team info §7[팀]  /  §e/team list  /  §e/team top");
             p.sendMessage("§e/team kick/promote/demote/ban/unban §7<플레이어>");
-            p.sendMessage("§e/team open  §f공개↔비공개  §7|  §e/team chat  §f팀채팅 토글");
+            p.sendMessage("§e/team chat  §f팀채팅 토글  §7|  §e/team pvp  §f팀킬 방지 토글 (리더)");
             p.sendMessage("§e/team disband  §f팀 해체 (리더)");
             if (p.isOp()) p.sendMessage("§c/team admin kick|disband|setleader ...");
         }
@@ -351,7 +380,6 @@ public class TeamsModule implements DashboardModule {
                 if (teamOf(uuid) != null) { p.sendMessage("§c이미 팀에 소속되어 있습니다."); return; }
                 Team t = teams.values().stream().filter(x -> x.name.equalsIgnoreCase(args[1])).findFirst().orElse(null);
                 if (t == null) { p.sendMessage("§c'" + args[1] + "' 팀을 찾을 수 없습니다."); return; }
-                if (!t.open) { p.sendMessage("§c이 팀은 비공개입니다. 초대를 통해서만 가입 가능합니다."); return; }
                 if (t.banned.containsKey(uuid)) { p.sendMessage("§c이 팀에서 밴 상태입니다."); return; }
                 t.members.put(uuid, new Member(p.getName(), Rank.MEMBER));
                 for (String mu : t.members.keySet()) {
@@ -387,7 +415,7 @@ public class TeamsModule implements DashboardModule {
                     if (t == null) { p.sendMessage("§c소속된 팀이 없습니다. /team info <팀이름>"); return; }
                 }
                 p.sendMessage("§6━━━━━ §e" + t.name + " §6━━━━━");
-                p.sendMessage("§7상태: " + (t.open ? "§a공개" : "§c비공개") + " §7· 멤버 §e" + t.members.size() + "명");
+                p.sendMessage("§7멤버 §e" + t.members.size() + "명  §7팀킬: " + (t.friendlyFire ? "§c허용" : "§a방지"));
                 String[] rLabels = {"§6리더", "§e부리더", "§b운영자", "§f멤버"};
                 Rank[]   ranks   = {Rank.LEADER, Rank.CO_LEADER, Rank.MODERATOR, Rank.MEMBER};
                 for (int i = 0; i < ranks.length; i++) {
@@ -405,7 +433,7 @@ public class TeamsModule implements DashboardModule {
                 p.sendMessage("§6━ §f팀 목록 §7(" + teams.size() + "개) §6━");
                 int i = 1;
                 for (Team t : teams.values())
-                    p.sendMessage("§f" + i++ + ". §e" + t.name + " §7(" + t.members.size() + "명) " + (t.open ? "§a공개" : "§c비공개"));
+                    p.sendMessage("§f" + i++ + ". §e" + t.name + " §7(" + t.members.size() + "명)");
             }
         }
 
@@ -414,7 +442,7 @@ public class TeamsModule implements DashboardModule {
                 if (teams.isEmpty()) { p.sendMessage("§7등록된 팀이 없습니다."); return; }
                 p.sendMessage("§6━ §f팀 순위 (멤버 수) §6━");
                 teams.values().stream().sorted((a, b) -> b.members.size() - a.members.size()).limit(10).forEach(t ->
-                    p.sendMessage("§e" + t.name + " §7- §f" + t.members.size() + "명 " + (t.open ? "§a공개" : "§c비공개")));
+                    p.sendMessage("§e" + t.name + " §7- §f" + t.members.size() + "명"));
             }
         }
 
@@ -505,12 +533,13 @@ public class TeamsModule implements DashboardModule {
             save(); p.sendMessage("§a" + args[1] + " §a님의 밴을 해제했습니다.");
         }
 
-        void open(Player p) {
+        void pvp(Player p) {
             Team t = synchronized_teamOf(p);
             if (t == null) { p.sendMessage("§c소속된 팀이 없습니다."); return; }
-            if (t.members.get(p.getUniqueId().toString()).rank != Rank.LEADER) { p.sendMessage("§c리더만 공개 설정을 변경할 수 있습니다."); return; }
-            boolean now; synchronized (TeamsModule.this) { t.open = !t.open; now = t.open; }
-            save(); p.sendMessage(now ? "§a팀이 §a공개§a 상태로 변경되었습니다." : "§a팀이 §c비공개§a 상태로 변경되었습니다.");
+            if (t.members.get(p.getUniqueId().toString()).rank != Rank.LEADER) { p.sendMessage("§c리더만 팀킬 설정을 변경할 수 있습니다."); return; }
+            boolean now; synchronized (TeamsModule.this) { t.friendlyFire = !t.friendlyFire; now = t.friendlyFire; }
+            save();
+            p.sendMessage(now ? "§c팀킬이 §c허용§c되었습니다. 팀원끼리 공격 가능합니다." : "§a팀킬이 §a방지§a되었습니다. 팀원을 공격할 수 없습니다.");
         }
 
         void chat(Player p) {
@@ -593,7 +622,7 @@ public class TeamsModule implements DashboardModule {
         if ("GET".equals(method)    && "/".equals(path))                                                        { listTeams(ex);                                 return; }
         if ("POST".equals(method)   && "/".equals(path))                                                        { createTeam(ex);                                return; }
         if ("DELETE".equals(method) && path.matches("/[^/]+"))                                                  { disbandTeam(ex, seg(path, 1));                 return; }
-        if ("POST".equals(method)   && path.matches("/[^/]+/open"))                                             { toggleOpen(ex, seg(path, 1));                  return; }
+        if ("POST".equals(method)   && path.matches("/[^/]+/pvp"))                                              { togglePvp(ex, seg(path, 1));                   return; }
         if ("POST".equals(method)   && path.matches("/[^/]+/members"))                                         { addMember(ex, seg(path, 1));                   return; }
         if ("POST".equals(method)   && path.matches("/[^/]+/members/[^/]+/(kick|promote|demote|ban|unban)")) {
             String[] p = path.split("/", -1);
@@ -638,14 +667,14 @@ public class TeamsModule implements DashboardModule {
         save(); send(ex, 200, ok("팀이 해체되었습니다."));
     }
 
-    private void toggleOpen(HttpExchange ex, String id) throws IOException {
+    private void togglePvp(HttpExchange ex, String id) throws IOException {
         boolean now;
         synchronized (this) {
             Team t = teams.get(id);
             if (t == null) { send(ex, 404, err("팀을 찾을 수 없습니다")); return; }
-            t.open = !t.open; now = t.open;
+            t.friendlyFire = !t.friendlyFire; now = t.friendlyFire;
         }
-        save(); send(ex, 200, ok(now ? "팀이 공개(Open) 상태로 변경되었습니다." : "팀이 비공개(Closed) 상태로 변경되었습니다."));
+        save(); send(ex, 200, ok(now ? "팀킬이 허용되었습니다." : "팀킬이 방지됩니다."));
     }
 
     private void addMember(HttpExchange ex, String id) throws Exception {
@@ -709,7 +738,8 @@ public class TeamsModule implements DashboardModule {
     private JsonObject toJson(Team t) {
         JsonObject o = new JsonObject();
         o.addProperty("id", t.id); o.addProperty("name", t.name);
-        o.addProperty("open", t.open); o.addProperty("memberCount", t.members.size());
+        o.addProperty("friendlyFire", t.friendlyFire);
+        o.addProperty("memberCount", t.members.size());
         JsonArray mArr = new JsonArray();
         t.members.forEach((uuid, m) -> {
             JsonObject mo = new JsonObject();
@@ -730,7 +760,8 @@ public class TeamsModule implements DashboardModule {
         YamlConfiguration cfg = new YamlConfiguration();
         for (Team t : teams.values()) {
             String base = "teams." + t.id;
-            cfg.set(base + ".name", t.name); cfg.set(base + ".open", t.open);
+            cfg.set(base + ".name", t.name);
+            cfg.set(base + ".friendlyFire", t.friendlyFire);
             t.members.forEach((u, m) -> { cfg.set(base + ".members." + u + ".name", m.name); cfg.set(base + ".members." + u + ".rank", m.rank.name()); });
             t.banned.forEach((u, n) -> cfg.set(base + ".banned." + u, n));
         }
@@ -744,7 +775,8 @@ public class TeamsModule implements DashboardModule {
         if (root == null) return;
         for (String id : root.getKeys(false)) {
             String name = root.getString(id + ".name"); if (name == null) continue;
-            Team t = new Team(id, name); t.open = root.getBoolean(id + ".open", false);
+            Team t = new Team(id, name);
+            t.friendlyFire = root.getBoolean(id + ".friendlyFire", false);
             ConfigurationSection ms = root.getConfigurationSection(id + ".members");
             if (ms != null) for (String u : ms.getKeys(false)) {
                 String mName = ms.getString(u + ".name", u), rs = ms.getString(u + ".rank", "MEMBER");
@@ -827,9 +859,8 @@ public class TeamsModule implements DashboardModule {
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
               <div style="flex:1;min-width:0">
                 <div id="tm-d-name" style="font-size:15px;font-weight:700;"></div>
-                <div id="tm-d-meta" style="font-size:11.5px;color:var(--text-2);margin-top:2px"></div>
               </div>
-              <button id="tm-d-open-btn" class="btn btn-ghost btn-sm" onclick="tmToggleOpen()"></button>
+              <button id="tm-d-pvp-btn" class="btn btn-sm btn-ghost" onclick="tmTogglePvp()"></button>
               <button class="btn btn-sm" style="background:rgba(239,68,68,.15);color:#ef4444;border:none" onclick="tmDisband()"><i class="ti ti-trash"></i> 해체</button>
             </div>
             <div style="display:flex;gap:8px;margin-bottom:14px">
@@ -878,15 +909,18 @@ public class TeamsModule implements DashboardModule {
           function renderList() {
             const el = document.getElementById('tm-list');
             if (!allTeams.length) { el.innerHTML='<div style="color:var(--text-2);font-size:13px;padding:8px 4px">팀이 없습니다.</div>'; return; }
-            el.innerHTML = allTeams.map(t => `<div class="tm-list-item ${t.id===currentId?'active':''}" onclick="tmSelect('${esc(t.id)}')"><i class="ti ${t.open?'ti-lock-open-2':'ti-lock'}" style="font-size:14px;color:var(--text-2);flex-shrink:0"></i><div class="tm-name" style="flex:1;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.name)}</div><span style="font-size:11px;color:var(--text-2)">${t.memberCount}명</span></div>`).join('');
+            el.innerHTML = allTeams.map(t => `<div class="tm-list-item ${t.id===currentId?'active':''}" onclick="tmSelect('${esc(t.id)}')"><i class="ti ti-users" style="font-size:14px;color:var(--text-2);flex-shrink:0"></i><div class="tm-name" style="flex:1;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.name)}</div><span style="font-size:11px;color:var(--text-2)">${t.memberCount}명</span></div>`).join('');
           }
           function renderDetail(t) {
             document.getElementById('tm-empty').style.display='none';
             document.getElementById('tm-detail').style.display='';
             document.getElementById('tm-d-name').textContent=t.name;
-            document.getElementById('tm-d-meta').textContent=(t.open?'🔓 공개팀':'🔒 비공개팀')+' · '+t.memberCount+'명';
             document.getElementById('tm-d-count').textContent=t.memberCount;
-            document.getElementById('tm-d-open-btn').innerHTML=t.open?'<i class="ti ti-lock"></i> 비공개로':'<i class="ti ti-lock-open-2"></i> 공개로';
+            const pvpBtn=document.getElementById('tm-d-pvp-btn');
+            pvpBtn.innerHTML=t.friendlyFire
+              ? '<i class="ti ti-sword" style="color:#ef4444"></i> 팀킬 허용'
+              : '<i class="ti ti-shield-check" style="color:#22c55e"></i> 팀킬 방지';
+            pvpBtn.title=t.friendlyFire?'클릭하면 팀킬 방지로 변경':'클릭하면 팀킬 허용으로 변경';
             const sorted=[...t.members].sort((a,b)=>rankOrder(a.rank)-rankOrder(b.rank));
             document.getElementById('tm-d-members').innerHTML=sorted.map(m=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:7px;background:var(--surface-2)"><span class="tm-dot ${m.online?'online':'offline'}"></span><span style="font-size:13px;flex:1">${esc(m.name)}</span><span class="tm-badge ${rankBadge(m.rank)}">${rankLabel(m.rank)}</span>${m.rank!=='LEADER'?`<div style="display:flex;gap:3px;flex-shrink:0"><button class="btn btn-ghost btn-sm" title="승급" style="padding:3px 6px" onclick="tmMA('${esc(t.id)}','${esc(m.uuid)}','promote')"><i class="ti ti-chevron-up" style="font-size:12px"></i></button><button class="btn btn-ghost btn-sm" title="강등" style="padding:3px 6px" onclick="tmMA('${esc(t.id)}','${esc(m.uuid)}','demote')"><i class="ti ti-chevron-down" style="font-size:12px"></i></button><button class="btn btn-ghost btn-sm" title="추방" style="padding:3px 6px" onclick="tmMA('${esc(t.id)}','${esc(m.uuid)}','kick')"><i class="ti ti-user-minus" style="font-size:12px;color:#f97316"></i></button><button class="btn btn-ghost btn-sm" title="밴" style="padding:3px 6px" onclick="tmMA('${esc(t.id)}','${esc(m.uuid)}','ban')"><i class="ti ti-ban" style="font-size:12px;color:#ef4444"></i></button></div>`:'<span style="font-size:11px;color:var(--text-3);padding:0 4px">리더</span>'}</div>`).join('')||'<div style="color:var(--text-2);font-size:12.5px;padding:6px 4px">멤버가 없습니다.</div>';
             const bWrap=document.getElementById('tm-d-banned-wrap'), bEl=document.getElementById('tm-d-banned');
@@ -912,9 +946,9 @@ public class TeamsModule implements DashboardModule {
             if (r.ok) { tmToast('팀이 해체되었습니다','success'); currentId=null; document.getElementById('tm-detail').style.display='none'; document.getElementById('tm-empty').style.display=''; await tmLoad(); }
             else tmToast(j.error||'해체 실패','error');
           };
-          window.tmToggleOpen = async function() {
+          window.tmTogglePvp = async function() {
             if (!currentId) return;
-            const r=await apiFetch('POST','/'+currentId+'/open'), j=await r.json().catch(()=>({}));
+            const r=await apiFetch('POST','/'+currentId+'/pvp'), j=await r.json().catch(()=>({}));
             if (r.ok) { tmToast(j.message,'success'); await tmLoad(); if(currentId){const t=allTeams.find(x=>x.id===currentId);if(t)renderDetail(t);} }
             else tmToast(j.error||'실패','error');
           };
