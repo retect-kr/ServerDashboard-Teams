@@ -5,6 +5,7 @@ import com.serverdashboard.DashboardPlugin;
 import com.serverdashboard.api.DashboardModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.serverdashboard.managers.ChatManager;
+import com.serverdashboard.models.ChatChannel;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -89,6 +90,8 @@ public class TeamsModule implements DashboardModule {
         if (chatMgr != null) {
             teamChatInterceptor = this::interceptTeamChat;
             chatMgr.addInterceptor(teamChatInterceptor);
+            // "/ch t"로 팀채팅 채널 전환 가능하도록 동적 채널 등록
+            chatMgr.addTransientChannel(new ChatChannel("team", "팀챗", "t", "§a", 0, null, false));
             // TeamListener only needed for PvP handler
             chatListener = new TeamPvpListener();
         } else {
@@ -102,8 +105,10 @@ public class TeamsModule implements DashboardModule {
     public void onUnload() {
         save();
         if (chatListener != null) org.bukkit.event.HandlerList.unregisterAll(chatListener);
-        if (teamChatInterceptor != null && plugin.getChatManager() != null)
-            plugin.getChatManager().removeInterceptor(teamChatInterceptor);
+        if (plugin.getChatManager() != null) {
+            if (teamChatInterceptor != null) plugin.getChatManager().removeInterceptor(teamChatInterceptor);
+            plugin.getChatManager().deleteChannel("team");
+        }
         unregisterCommand();
     }
 
@@ -139,7 +144,15 @@ public class TeamsModule implements DashboardModule {
 
     // Called by ChatManager interceptor when ChatManager is available
     private boolean interceptTeamChat(Player p, String message) {
-        if (!teamChat.contains(p.getUniqueId())) return false;
+        // /team chat 토글 OR /ch t 로 team 채널 선택 시 모두 팀챗으로 처리
+        boolean inTeamChatToggle = teamChat.contains(p.getUniqueId());
+        boolean inTeamChannel    = false;
+        ChatManager chatMgr = plugin.getChatManager();
+        if (!inTeamChatToggle && chatMgr != null) {
+            String cur = chatMgr.getPlayerChannel(p.getUniqueId());
+            inTeamChannel = "team".equals(cur);
+        }
+        if (!inTeamChatToggle && !inTeamChannel) return false;
         Team t;
         synchronized (TeamsModule.this) { t = teamOf(p.getUniqueId().toString()); }
         if (t == null) { teamChat.remove(p.getUniqueId()); return false; }
@@ -223,7 +236,7 @@ public class TeamsModule implements DashboardModule {
                 case "invite"  -> invite(p, args);
                 case "accept"  -> accept(p, args);
                 case "deny"    -> deny(p);
-                case "join"    -> join(p, args);
+                case "join"    -> p.sendMessage("§c자유 가입은 불가합니다. 팀 관리자에게 초대를 요청하세요.");
                 case "leave"   -> leave(p);
                 case "info"    -> info(p, args);
                 case "list"    -> list(p);
@@ -245,7 +258,7 @@ public class TeamsModule implements DashboardModule {
         public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
             if (!(sender instanceof Player p)) return List.of();
             List<String> subs = new ArrayList<>(List.of(
-                "create","disband","invite","accept","deny","join","leave",
+                "create","disband","invite","accept","deny","leave",
                 "info","list","top","kick","promote","demote","ban","unban","chat","pvp"
             ));
             if (p.isOp()) subs.add("admin");
@@ -287,7 +300,6 @@ public class TeamsModule implements DashboardModule {
             p.sendMessage("§e/team invite §7<플레이어>  §f팀원 초대");
             p.sendMessage("§e/team accept §7[팀]  §f초대 수락");
             p.sendMessage("§e/team deny  §f초대 거절");
-            p.sendMessage("§e/team join §7<팀>  §f공개팀 입장");
             p.sendMessage("§e/team leave  §f팀 탈퇴");
             p.sendMessage("§e/team info §7[팀]  /  §e/team list  /  §e/team top");
             p.sendMessage("§e/team kick/promote/demote/ban/unban §7<플레이어>");
