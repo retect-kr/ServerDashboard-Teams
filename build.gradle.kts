@@ -18,7 +18,7 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT")
-    compileOnly(files("../ServerDashboard/build/libs/ServerDashboard-1.8.2.jar"))
+    compileOnly(files("../ServerDashboard/build/libs/ServerDashboard-1.9.0.jar"))
 }
 
 tasks {

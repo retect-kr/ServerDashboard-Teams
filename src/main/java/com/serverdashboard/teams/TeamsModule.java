@@ -4,10 +4,12 @@ import com.google.gson.*;
 import com.serverdashboard.DashboardPlugin;
 import com.serverdashboard.api.DashboardModule;
 import com.sun.net.httpserver.HttpExchange;
+import com.serverdashboard.managers.ChatManager;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.command.*;
@@ -61,10 +63,11 @@ public class TeamsModule implements DashboardModule {
     private final Map<UUID, List<String>> pendingInvites = new HashMap<>();
     private final Set<UUID>               teamChat       = Collections.synchronizedSet(new HashSet<>());
 
-    private DashboardPlugin plugin;
-    private Path            dataFile;
-    private Listener        chatListener;
-    private Command         registeredCmd;
+    private DashboardPlugin      plugin;
+    private Path                 dataFile;
+    private Listener             chatListener;
+    private Command              registeredCmd;
+    private ChatManager.ChatInterceptor teamChatInterceptor;
 
     // ── DashboardModule ────────────────────────────────────────────────────────
 
@@ -81,7 +84,16 @@ public class TeamsModule implements DashboardModule {
         try { Files.createDirectories(dataFile.getParent()); } catch (IOException ignored) {}
         load();
         registerCommand();
-        chatListener = new TeamListener();
+        // Register with ChatManager interceptor (preferred) or fall back to own listener
+        ChatManager chatMgr = plugin.getChatManager();
+        if (chatMgr != null) {
+            teamChatInterceptor = this::interceptTeamChat;
+            chatMgr.addInterceptor(teamChatInterceptor);
+            // TeamListener only needed for PvP handler
+            chatListener = new TeamPvpListener();
+        } else {
+            chatListener = new TeamListener();
+        }
         Bukkit.getPluginManager().registerEvents(chatListener, plugin);
         plugin.getLogger().info("[Teams] " + teams.size() + "개 팀 로드됨.");
     }
@@ -90,6 +102,8 @@ public class TeamsModule implements DashboardModule {
     public void onUnload() {
         save();
         if (chatListener != null) org.bukkit.event.HandlerList.unregisterAll(chatListener);
+        if (teamChatInterceptor != null && plugin.getChatManager() != null)
+            plugin.getChatManager().removeInterceptor(teamChatInterceptor);
         unregisterCommand();
     }
 
@@ -123,57 +137,73 @@ public class TeamsModule implements DashboardModule {
 
     // ── Chat listener ──────────────────────────────────────────────────────────
 
-    private class TeamListener implements Listener {
+    // Called by ChatManager interceptor when ChatManager is available
+    private boolean interceptTeamChat(Player p, String message) {
+        if (!teamChat.contains(p.getUniqueId())) return false;
+        Team t;
+        synchronized (TeamsModule.this) { t = teamOf(p.getUniqueId().toString()); }
+        if (t == null) { teamChat.remove(p.getUniqueId()); return false; }
+        sendTeamChatMsg(p, t, message);
+        return true;
+    }
 
+    private void sendTeamChatMsg(Player p, Team t, String message) {
+        Component msg = Component.text("[팀챗] ", NamedTextColor.GREEN).decorate(TextDecoration.BOLD)
+                .append(Component.text("[" + t.name + "] ").color(NamedTextColor.GOLD).decoration(TextDecoration.BOLD, false))
+                .append(Component.text(p.getName() + ": ").color(NamedTextColor.YELLOW))
+                .append(LegacyComponentSerializer.legacySection().deserialize(message).colorIfAbsent(NamedTextColor.WHITE));
+        final String tid = t.id;
+        synchronized (TeamsModule.this) {
+            Team team = teams.get(tid);
+            if (team == null) return;
+            for (String uuid : team.members.keySet()) {
+                Player m = Bukkit.getPlayer(UUID.fromString(uuid));
+                if (m != null) m.sendMessage(msg);
+            }
+        }
+    }
+
+    // Full listener used when ChatManager is NOT available (standalone mode)
+    private class TeamListener implements Listener {
         @EventHandler(priority = EventPriority.HIGHEST)
         public void onChat(AsyncChatEvent event) {
             Player p = event.getPlayer();
             if (!teamChat.contains(p.getUniqueId())) return;
-
             Team t;
             synchronized (TeamsModule.this) { t = teamOf(p.getUniqueId().toString()); }
             if (t == null) { teamChat.remove(p.getUniqueId()); return; }
-
             event.setCancelled(true);
-
-            Component msg = Component.text("[팀챗] ", NamedTextColor.GREEN).decorate(TextDecoration.BOLD)
-                    .append(Component.text("[" + t.name + "] ").color(NamedTextColor.GOLD).decoration(TextDecoration.BOLD, false))
-                    .append(Component.text(p.getName() + ": ").color(NamedTextColor.YELLOW))
-                    .append(event.message().colorIfAbsent(NamedTextColor.WHITE));
-
-            final String tid = t.id;
-            synchronized (TeamsModule.this) {
-                Team team = teams.get(tid);
-                if (team == null) return;
-                for (String uuid : team.members.keySet()) {
-                    Player m = Bukkit.getPlayer(UUID.fromString(uuid));
-                    if (m != null) m.sendMessage(msg);
-                }
-            }
+            String plain = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(event.message());
+            sendTeamChatMsg(p, t, plain);
         }
-
         @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
-        public void onDamage(EntityDamageByEntityEvent event) {
-            if (!(event.getEntity() instanceof Player victim)) return;
+        public void onDamage(EntityDamageByEntityEvent event) { handlePvp(event); }
+    }
 
-            Player attacker = null;
-            if (event.getDamager() instanceof Player pa) {
-                attacker = pa;
-            } else if (event.getDamager() instanceof Projectile proj && proj.getShooter() instanceof Player ps) {
-                attacker = ps;
-            }
-            if (attacker == null || attacker.getUniqueId().equals(victim.getUniqueId())) return;
+    // PvP-only listener used when ChatManager handles chat
+    private class TeamPvpListener implements Listener {
+        @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+        public void onDamage(EntityDamageByEntityEvent event) { handlePvp(event); }
+    }
 
-            String aUuid = attacker.getUniqueId().toString();
-            String vUuid = victim.getUniqueId().toString();
-            synchronized (TeamsModule.this) {
-                Team t = teamOf(aUuid);
-                if (t == null || !t.members.containsKey(vUuid)) return;
-                if (t.friendlyFire) return;
-            }
-            event.setCancelled(true);
-            attacker.sendMessage("§c같은 팀원은 공격할 수 없습니다.");
+    private void handlePvp(EntityDamageByEntityEvent event) {
+        if (!(event.getEntity() instanceof Player victim)) return;
+        Player attacker = null;
+        if (event.getDamager() instanceof Player pa) {
+            attacker = pa;
+        } else if (event.getDamager() instanceof Projectile proj && proj.getShooter() instanceof Player ps) {
+            attacker = ps;
         }
+        if (attacker == null || attacker.getUniqueId().equals(victim.getUniqueId())) return;
+        String aUuid = attacker.getUniqueId().toString();
+        String vUuid = victim.getUniqueId().toString();
+        synchronized (TeamsModule.this) {
+            Team t = teamOf(aUuid);
+            if (t == null || !t.members.containsKey(vUuid)) return;
+            if (t.friendlyFire) return;
+        }
+        event.setCancelled(true);
+        attacker.sendMessage("§c같은 팀원은 공격할 수 없습니다.");
     }
 
     // ── /team command ──────────────────────────────────────────────────────────
