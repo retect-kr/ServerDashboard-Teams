@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.serverdashboard.teams"
-version = "1.0.0"
+version = "2.0.0"
 
 java {
     toolchain {
@@ -18,7 +18,7 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT")
-    compileOnly(files("../ServerDashboard/build/libs/ServerDashboard-1.9.0.jar"))
+    compileOnly(files("../ServerDashboard/build/libs/ServerDashboard-2.0.0.jar"))
 }
 
 tasks {
