@@ -246,7 +246,6 @@ public class TeamsModule implements DashboardModule {
                 case "demote"  -> demote(p, args);
                 case "ban"     -> ban(p, args);
                 case "unban"   -> unban(p, args);
-                case "chat"    -> chat(p);
                 case "pvp"     -> pvp(p);
                 case "admin"   -> admin(p, args);
                 default        -> help(p);
@@ -259,7 +258,7 @@ public class TeamsModule implements DashboardModule {
             if (!(sender instanceof Player p)) return List.of();
             List<String> subs = new ArrayList<>(List.of(
                 "create","disband","invite","accept","deny","leave",
-                "info","list","top","kick","promote","demote","ban","unban","chat","pvp"
+                "info","list","top","kick","promote","demote","ban","unban","pvp"
             ));
             if (p.isOp()) subs.add("admin");
 
@@ -303,7 +302,7 @@ public class TeamsModule implements DashboardModule {
             p.sendMessage("§e/team leave  §f팀 탈퇴");
             p.sendMessage("§e/team info §7[팀]  /  §e/team list  /  §e/team top");
             p.sendMessage("§e/team kick/promote/demote/ban/unban §7<플레이어>");
-            p.sendMessage("§e/team chat  §f팀채팅 토글  §7|  §e/team pvp  §f팀킬 방지 토글 (리더)");
+            p.sendMessage("§e/team pvp  §f팀킬 방지 토글 (리더)  §7|  §7팀채팅: §f/ch t");
             p.sendMessage("§e/team disband  §f팀 해체 (리더)");
             if (p.isOp()) p.sendMessage("§c/team admin kick|disband|setleader ...");
         }
@@ -584,27 +583,6 @@ public class TeamsModule implements DashboardModule {
             p.sendMessage(now ? "§c팀킬이 §c허용§c되었습니다. 팀원끼리 공격 가능합니다." : "§a팀킬이 §a방지§a되었습니다. 팀원을 공격할 수 없습니다.");
         }
 
-        void chat(Player p) {
-            if (synchronized_teamOf(p) == null) { p.sendMessage("§c소속된 팀이 없습니다."); return; }
-            ChatManager chatMgr = plugin.getChatManager();
-            if (chatMgr != null) {
-                String cur = chatMgr.getPlayerChannel(p.getUniqueId());
-                if ("team".equals(cur)) {
-                    // 팀챗 → 기본 채널로 복귀
-                    ChatChannel def = chatMgr.defaultChannel();
-                    if (def != null) chatMgr.handleCh(p, new String[]{def.getId()});
-                    p.sendMessage("§7팀 채팅 §c꺼짐§7. 일반 채팅으로 전환되었습니다.");
-                } else {
-                    chatMgr.handleCh(p, new String[]{"t"});
-                    p.sendMessage("§7팀 채팅 §a켜짐§7. §f/team chat §7또는 §f/ch g §7로 나갈 수 있습니다.");
-                }
-            } else {
-                // ChatManager 없을 때 폴백
-                UUID uuid = p.getUniqueId();
-                if (teamChat.contains(uuid)) { teamChat.remove(uuid); p.sendMessage("§7팀 채팅 §c꺼짐"); }
-                else { teamChat.add(uuid); p.sendMessage("§7팀 채팅 §a켜짐"); }
-            }
-        }
 
         void admin(Player p, String[] args) {
             if (!p.isOp()) { p.sendMessage("§c권한이 없습니다."); return; }
