@@ -62,13 +62,13 @@ public class TeamsModule implements DashboardModule {
 
     private final Map<String, Team>       teams          = new LinkedHashMap<>();
     private final Map<UUID, List<String>> pendingInvites = new HashMap<>();
+    // teamChat set: ChatManager 없을 때 폴백 전용
     private final Set<UUID>               teamChat       = Collections.synchronizedSet(new HashSet<>());
 
-    private DashboardPlugin      plugin;
-    private Path                 dataFile;
-    private Listener             chatListener;
-    private Command              registeredCmd;
-    private ChatManager.ChatInterceptor teamChatInterceptor;
+    private DashboardPlugin plugin;
+    private Path            dataFile;
+    private Listener        chatListener;
+    private Command         registeredCmd;
 
     // ── DashboardModule ────────────────────────────────────────────────────────
 
@@ -85,16 +85,15 @@ public class TeamsModule implements DashboardModule {
         try { Files.createDirectories(dataFile.getParent()); } catch (IOException ignored) {}
         load();
         registerCommand();
-        // Register with ChatManager interceptor (preferred) or fall back to own listener
         ChatManager chatMgr = plugin.getChatManager();
         if (chatMgr != null) {
-            teamChatInterceptor = this::interceptTeamChat;
-            chatMgr.addInterceptor(teamChatInterceptor);
-            // "/ch t"로 팀채팅 채널 전환 가능하도록 동적 채널 등록
+            // "team" 채널을 채널 시스템에 등록하고, 라우터로 팀원에게만 전달
             chatMgr.addTransientChannel(new ChatChannel("team", "팀챗", "t", "§a", 0, null, false));
-            // TeamListener only needed for PvP handler
+            chatMgr.registerChannelRouter("team", this::routeTeamChat);
+            // PvP 리스너만 등록
             chatListener = new TeamPvpListener();
         } else {
+            // ChatManager 없을 때 폴백: 자체 리스너로 팀챗 + PvP 처리
             chatListener = new TeamListener();
         }
         Bukkit.getPluginManager().registerEvents(chatListener, plugin);
@@ -106,7 +105,7 @@ public class TeamsModule implements DashboardModule {
         save();
         if (chatListener != null) org.bukkit.event.HandlerList.unregisterAll(chatListener);
         if (plugin.getChatManager() != null) {
-            if (teamChatInterceptor != null) plugin.getChatManager().removeInterceptor(teamChatInterceptor);
+            plugin.getChatManager().unregisterChannelRouter("team");
             plugin.getChatManager().deleteChannel("team");
         }
         unregisterCommand();
@@ -142,20 +141,21 @@ public class TeamsModule implements DashboardModule {
 
     // ── Chat listener ──────────────────────────────────────────────────────────
 
-    // Called by ChatManager interceptor when ChatManager is available
-    private boolean interceptTeamChat(Player p, String message) {
-        // /team chat 토글 OR /ch t 로 team 채널 선택 시 모두 팀챗으로 처리
-        boolean inTeamChatToggle = teamChat.contains(p.getUniqueId());
-        boolean inTeamChannel    = false;
-        ChatManager chatMgr = plugin.getChatManager();
-        if (!inTeamChatToggle && chatMgr != null) {
-            String cur = chatMgr.getPlayerChannel(p.getUniqueId());
-            inTeamChannel = "team".equals(cur);
-        }
-        if (!inTeamChatToggle && !inTeamChannel) return false;
+    // ChatManager 채널 라우터 — "/ch t"로 "team" 채널 진입 시 호출됨
+    private boolean routeTeamChat(Player p, com.serverdashboard.models.ChatChannel channel,
+                                  String message, net.kyori.adventure.text.Component formatted) {
         Team t;
         synchronized (TeamsModule.this) { t = teamOf(p.getUniqueId().toString()); }
-        if (t == null) { teamChat.remove(p.getUniqueId()); return false; }
+        if (t == null) {
+            // 팀이 없으면 글로벌로 자동 전환
+            p.sendMessage("§c소속된 팀이 없어 글로벌 채널로 전환합니다.");
+            ChatManager chatMgr = plugin.getChatManager();
+            if (chatMgr != null) {
+                ChatChannel def = chatMgr.defaultChannel();
+                if (def != null) chatMgr.handleCh(p, new String[]{def.getId()});
+            }
+            return true; // 메시지 소비 (재전송 방지)
+        }
         sendTeamChatMsg(p, t, message);
         return true;
     }
@@ -585,10 +585,25 @@ public class TeamsModule implements DashboardModule {
         }
 
         void chat(Player p) {
-            UUID uuid = p.getUniqueId();
             if (synchronized_teamOf(p) == null) { p.sendMessage("§c소속된 팀이 없습니다."); return; }
-            if (teamChat.contains(uuid)) { teamChat.remove(uuid); p.sendMessage("§7팀 채팅 §c꺼짐§7. 이제 일반 채팅으로 전송됩니다."); }
-            else { teamChat.add(uuid); p.sendMessage("§7팀 채팅 §a켜짐§7. 메시지가 팀원에게만 전송됩니다. 다시 치려면 §f/team chat"); }
+            ChatManager chatMgr = plugin.getChatManager();
+            if (chatMgr != null) {
+                String cur = chatMgr.getPlayerChannel(p.getUniqueId());
+                if ("team".equals(cur)) {
+                    // 팀챗 → 기본 채널로 복귀
+                    ChatChannel def = chatMgr.defaultChannel();
+                    if (def != null) chatMgr.handleCh(p, new String[]{def.getId()});
+                    p.sendMessage("§7팀 채팅 §c꺼짐§7. 일반 채팅으로 전환되었습니다.");
+                } else {
+                    chatMgr.handleCh(p, new String[]{"t"});
+                    p.sendMessage("§7팀 채팅 §a켜짐§7. §f/team chat §7또는 §f/ch g §7로 나갈 수 있습니다.");
+                }
+            } else {
+                // ChatManager 없을 때 폴백
+                UUID uuid = p.getUniqueId();
+                if (teamChat.contains(uuid)) { teamChat.remove(uuid); p.sendMessage("§7팀 채팅 §c꺼짐"); }
+                else { teamChat.add(uuid); p.sendMessage("§7팀 채팅 §a켜짐"); }
+            }
         }
 
         void admin(Player p, String[] args) {
