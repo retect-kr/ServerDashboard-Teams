@@ -150,7 +150,7 @@ public class TeamsModule implements DashboardModule {
     private void sendTeamChatMsg(Player p, Team t, String message) {
         Component msg = Component.text("[팀챗] ", NamedTextColor.GREEN).decorate(TextDecoration.BOLD)
                 .append(Component.text("[" + t.name + "] ").color(NamedTextColor.GOLD).decoration(TextDecoration.BOLD, false))
-                .append(Component.text(p.getName() + ": ").color(NamedTextColor.YELLOW))
+                .append(Component.text(p.getName() + ": ").color(NamedTextColor.GRAY))
                 .append(LegacyComponentSerializer.legacySection().deserialize(message).colorIfAbsent(NamedTextColor.WHITE));
         final String tid = t.id;
         synchronized (TeamsModule.this) {
